@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
+import { internal } from "./_generated/api";
 import {
   toolCategoryValidator,
   toolConditionValidator,
@@ -7,26 +8,12 @@ import {
 import {
   assertCanDeleteTool,
   assertCanEditTool,
+  buildMinimizedLoanWebhookPayload,
   toPublicToolSummary,
+  validateToolFields,
   ValidationError,
 } from "./lib/rbac";
 import { requireCurrentUser } from "./users";
-
-function validateToolFields(name: string, description: string) {
-  const trimmedName = name.trim();
-  const trimmedDesc = description.trim();
-  if (trimmedName.length < 2 || trimmedName.length > 100) {
-    throw new ValidationError(
-      "Tool name must be between 2 and 100 characters."
-    );
-  }
-  if (trimmedDesc.length < 4 || trimmedDesc.length > 500) {
-    throw new ValidationError(
-      "Short description must be between 4 and 500 characters."
-    );
-  }
-  return { trimmedName, trimmedDesc };
-}
 
 /**
  * PUBLIC QUERY: Read-only list of available tools for the unauthenticated landing page.
@@ -210,16 +197,67 @@ export const deleteTool = mutation({
       );
     }
 
-    // Automatically decline any still-pending requests for this tool before removing it
+    // Automatically decline any still-pending requests (and close active loans if admin-removed)
     const now = Date.now();
+    const lender = await ctx.db.get(tool.ownerId);
+
     for (const loan of relatedLoans) {
       if (loan.status === "pending") {
         await ctx.db.patch(loan._id, {
           status: "declined",
           declinedAt: now,
           lenderNote: "Listing was removed.",
+          lastAutomationSummary: "Decline notification queued for n8n",
+          lastAutomationAt: now,
           updatedAt: now,
         });
+
+        const borrower = await ctx.db.get(loan.borrowerId);
+        const updatedLoan = await ctx.db.get(loan._id);
+        if (lender && borrower && updatedLoan) {
+          const eventId = `loan-declined:${loan._id}:${now}`;
+          const payload = buildMinimizedLoanWebhookPayload({
+            eventId,
+            eventType: "loan.declined",
+            loan: updatedLoan,
+            tool,
+            lender,
+            borrower,
+            occurredAtMs: now,
+          });
+          await ctx.scheduler.runAfter(0, internal.n8n.dispatchLoanWebhook, {
+            loanId: loan._id,
+            payload,
+          });
+        }
+      } else if (loan.status === "approved" && currentUser.role === "admin") {
+        await ctx.db.patch(loan._id, {
+          status: "returned",
+          returnedAt: now,
+          lenderNote: "Listing removed by admin.",
+          lastAutomationSummary: "Return confirmation notification queued for n8n",
+          lastAutomationAt: now,
+          updatedAt: now,
+        });
+
+        const borrower = await ctx.db.get(loan.borrowerId);
+        const updatedLoan = await ctx.db.get(loan._id);
+        if (lender && borrower && updatedLoan) {
+          const eventId = `loan-returned:${loan._id}:${now}`;
+          const payload = buildMinimizedLoanWebhookPayload({
+            eventId,
+            eventType: "loan.returned",
+            loan: updatedLoan,
+            tool,
+            lender,
+            borrower,
+            occurredAtMs: now,
+          });
+          await ctx.scheduler.runAfter(0, internal.n8n.dispatchLoanWebhook, {
+            loanId: loan._id,
+            payload,
+          });
+        }
       }
     }
 

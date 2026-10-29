@@ -17,6 +17,7 @@ import {
   ToolRecord,
   toPublicToolSummary,
   validateBorrowDateRange,
+  validateToolFields,
   ValidationError,
 } from "@convex/lib/rbac";
 import {
@@ -319,21 +320,25 @@ export function SandboxBoard() {
 
   function simulateDailyOverdueCron() {
     const now = Date.now();
-    setLoans((prev) =>
-      prev.map((loan) => {
-        const overdueDays =
-          loan.status === "approved"
-            ? computeDaysOverdue(loan.endDate, todayIso)
-            : 0;
-        if (overdueDays <= 0) return loan;
+    const nextKeys = new Set(processedIdempotencyKeys);
+    const eventsToAdd: Array<{ loanId: string; evt: AutomationEventView }> = [];
 
-        const idempotencyKey = `overdue-reminder:${loan._id}:${todayIso}`;
-        if (processedIdempotencyKeys.has(idempotencyKey)) {
-          return loan;
-        }
+    const nextLoans = loans.map((loan) => {
+      const overdueDays =
+        loan.status === "approved"
+          ? computeDaysOverdue(loan.endDate, todayIso)
+          : 0;
+      if (overdueDays <= 0) return loan;
 
-        setProcessedIdempotencyKeys((keys) => new Set(keys).add(idempotencyKey));
-        appendAutomationEvent(loan._id, {
+      const idempotencyKey = `overdue-reminder:${loan._id}:${todayIso}`;
+      if (nextKeys.has(idempotencyKey)) {
+        return loan;
+      }
+
+      nextKeys.add(idempotencyKey);
+      eventsToAdd.push({
+        loanId: loan._id,
+        evt: {
           _id: `evt_${now}_${loan._id}`,
           workflow: "overdue_reminder",
           eventType: "loan.overdue_reminder",
@@ -342,18 +347,30 @@ export function SandboxBoard() {
           summary: `Overdue reminder sent (${overdueDays}d overdue)`,
           attemptCount: 1,
           createdAt: now,
-        });
+        },
+      });
 
-        return {
-          ...loan,
-          reminderCount: loan.reminderCount + 1,
-          lastReminderSentAt: now,
-          lastReminderDateKey: todayIso,
-          lastAutomationSummary: `Overdue reminder sent (${overdueDays}d overdue)`,
-          lastAutomationAt: now,
-        };
-      })
-    );
+      return {
+        ...loan,
+        reminderCount: loan.reminderCount + 1,
+        lastReminderSentAt: now,
+        lastReminderDateKey: todayIso,
+        lastAutomationSummary: `Overdue reminder sent (${overdueDays}d overdue)`,
+        lastAutomationAt: now,
+      };
+    });
+
+    if (eventsToAdd.length > 0) {
+      setProcessedIdempotencyKeys(nextKeys);
+      setLoans(nextLoans);
+      setEventsByLoan((prev) => {
+        const updated = { ...prev };
+        for (const { loanId, evt } of eventsToAdd) {
+          updated[loanId] = [evt, ...(updated[loanId] ?? [])];
+        }
+        return updated;
+      });
+    }
   }
 
   const sandboxBar = (
@@ -424,13 +441,17 @@ export function SandboxBoard() {
       sandboxControls={sandboxBar}
       onCreateTool={async (input) => {
         if (!currentUser) throw new ValidationError("Sign in required.");
+        const { trimmedName, trimmedDesc } = validateToolFields(
+          input.name,
+          input.description
+        );
         const now = Date.now();
         const newTool: ToolRecord = {
           _id: `tool_${now}`,
-          name: input.name.trim(),
+          name: trimmedName,
           category: input.category,
           condition: input.condition,
-          description: input.description.trim(),
+          description: trimmedDesc,
           ownerId: currentUser._id,
           isAvailable: true,
           createdAt: now,
@@ -442,15 +463,19 @@ export function SandboxBoard() {
         const target = tools.find((t) => t._id === input.toolId);
         if (!target) throw new ValidationError("Tool not found.");
         assertCanEditTool(currentUser, target);
+        const { trimmedName, trimmedDesc } = validateToolFields(
+          input.name,
+          input.description
+        );
         setTools((prev) =>
           prev.map((t) =>
             t._id === input.toolId
               ? {
                   ...t,
-                  name: input.name.trim(),
+                  name: trimmedName,
                   category: input.category,
                   condition: input.condition,
-                  description: input.description.trim(),
+                  description: trimmedDesc,
                   updatedAt: Date.now(),
                 }
               : t
@@ -461,6 +486,42 @@ export function SandboxBoard() {
         const target = tools.find((t) => t._id === toolId);
         if (!target) throw new ValidationError("Tool not found.");
         assertCanDeleteTool(currentUser, target);
+
+        const relatedLoans = loans.filter((l) => l.toolId === toolId);
+        const hasActiveLoan = relatedLoans.some((l) => l.status === "approved");
+        if (hasActiveLoan && currentUser.role !== "admin") {
+          throw new ValidationError(
+            "Cannot delete a listing while it is out on an active loan. Mark the loan as returned first."
+          );
+        }
+
+        const now = Date.now();
+        setLoans((prev) =>
+          prev.map((l) => {
+            if (l.toolId !== toolId) return l;
+            if (l.status === "pending") {
+              return {
+                ...l,
+                status: "declined",
+                lenderNote: "Listing was removed.",
+                lastAutomationSummary:
+                  "Decline notification delivered via n8n",
+                lastAutomationAt: now,
+              };
+            }
+            if (l.status === "approved" && currentUser.role === "admin") {
+              return {
+                ...l,
+                status: "returned",
+                lenderNote: "Listing removed by admin.",
+                lastAutomationSummary:
+                  "Return confirmation delivered via n8n",
+                lastAutomationAt: now,
+              };
+            }
+            return l;
+          })
+        );
         setTools((prev) => prev.filter((t) => t._id !== toolId));
       }}
       onRequestBorrow={async (input) => {
@@ -468,6 +529,18 @@ export function SandboxBoard() {
         if (!tool) throw new ValidationError("Tool not found.");
         assertCanRequestBorrow(currentUser, tool);
         validateBorrowDateRange(input.startDate, input.endDate);
+
+        const hasDuplicatePending = loans.some(
+          (l) =>
+            l.borrowerId === currentUser._id &&
+            l.toolId === input.toolId &&
+            l.status === "pending"
+        );
+        if (hasDuplicatePending) {
+          throw new ValidationError(
+            "You already have a pending request for this tool."
+          );
+        }
 
         const lender = userMap.get(tool.ownerId);
         if (!lender || !currentUser) {
@@ -517,6 +590,14 @@ export function SandboxBoard() {
         if (!loan) throw new ValidationError("Loan not found.");
         assertCanReviewLoanRequest(currentUser, loan);
 
+        const tool = tools.find((t) => t._id === loan.toolId);
+        if (!tool) throw new ValidationError("Associated tool listing not found.");
+        if (!tool.isAvailable) {
+          throw new ValidationError(
+            "This tool is already checked out on another active loan."
+          );
+        }
+
         const now = Date.now();
         setTools((prev) =>
           prev.map((t) =>
@@ -524,18 +605,29 @@ export function SandboxBoard() {
           )
         );
         setLoans((prev) =>
-          prev.map((l) =>
-            l._id === loanId
-              ? {
-                  ...l,
-                  status: "approved",
-                  lenderNote,
-                  lastAutomationSummary:
-                    "Approval notification delivered via n8n",
-                  lastAutomationAt: now,
-                }
-              : l
-          )
+          prev.map((l) => {
+            if (l._id === loanId) {
+              return {
+                ...l,
+                status: "approved",
+                lenderNote,
+                lastAutomationSummary:
+                  "Approval notification delivered via n8n",
+                lastAutomationAt: now,
+              };
+            }
+            if (l.toolId === loan.toolId && l.status === "pending") {
+              return {
+                ...l,
+                status: "declined",
+                lenderNote: "Tool was approved for another overlapping request.",
+                lastAutomationSummary:
+                  "Decline notification delivered via n8n",
+                lastAutomationAt: now,
+              };
+            }
+            return l;
+          })
         );
         appendAutomationEvent(loanId, {
           _id: `evt_${now}`,

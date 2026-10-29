@@ -306,6 +306,10 @@ describe("3. Date Validation & Overdue Calculations", () => {
     expect(() =>
       validateBorrowDateRange("2026-10-01", "2026-10-15", "2026-10-30")
     ).toThrow(ValidationError);
+
+    expect(() =>
+      validateBorrowDateRange("2026-10-01", "2026-11-05", "2026-10-30")
+    ).toThrow("Borrow start date cannot be in the past");
   });
 
   it("computes overdue days accurately", () => {
@@ -586,7 +590,7 @@ describe("5. Exported n8n Workflows Audit & End-to-End Code Execution", () => {
 });
 
 describe("6. UI Automation Activity Formatting", () => {
-  it("formats overdue reminder relative badges accurately", () => {
+  it("formats overdue reminder relative badges accurately and updates when a newer event occurs", () => {
     const now = 1760000000000;
     const twoDaysAgo = now - 2 * 24 * 60 * 60 * 1000;
 
@@ -595,8 +599,19 @@ describe("6. UI Automation Activity Formatting", () => {
       formatLoanAutomationBadge({
         lastReminderSentAt: twoDaysAgo,
         lastAutomationSummary: "Overdue reminder sent",
+        lastAutomationAt: twoDaysAgo,
         nowMs: now,
       })
     ).toBe("Reminder sent 2 days ago");
+
+    // When a loan is subsequently returned after an overdue reminder, the newer event should be displayed
+    expect(
+      formatLoanAutomationBadge({
+        lastReminderSentAt: twoDaysAgo,
+        lastAutomationSummary: "Return confirmation delivered via n8n",
+        lastAutomationAt: now - 10000,
+        nowMs: now,
+      })
+    ).toBe("Return confirmation delivered via n8n · just now");
   });
 });

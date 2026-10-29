@@ -105,7 +105,10 @@ export function assertAdmin(
 /**
  * Only the owner can edit a tool listing's details.
  */
-export function assertCanEditTool(user: ActorUser | null, tool: ToolRecord): void {
+export function assertCanEditTool(
+  user: ActorUser | null | undefined,
+  tool: ToolRecord
+): asserts user is ActorUser {
   assertAuthenticated(user);
   if (tool.ownerId !== user._id) {
     throw new AuthorizationError(
@@ -117,7 +120,10 @@ export function assertCanEditTool(user: ActorUser | null, tool: ToolRecord): voi
 /**
  * Users can delete only their own listings; admins can remove any listing.
  */
-export function assertCanDeleteTool(user: ActorUser | null, tool: ToolRecord): void {
+export function assertCanDeleteTool(
+  user: ActorUser | null | undefined,
+  tool: ToolRecord
+): asserts user is ActorUser {
   assertAuthenticated(user);
   if (user.role !== "admin" && tool.ownerId !== user._id) {
     throw new AuthorizationError(
@@ -131,9 +137,9 @@ export function assertCanDeleteTool(user: ActorUser | null, tool: ToolRecord): v
  * and the tool must currently be available.
  */
 export function assertCanRequestBorrow(
-  user: ActorUser | null,
+  user: ActorUser | null | undefined,
   tool: ToolRecord
-): void {
+): asserts user is ActorUser {
   assertAuthenticated(user);
   if (tool.ownerId === user._id) {
     throw new ValidationError("You cannot request to borrow your own tool.");
@@ -149,9 +155,9 @@ export function assertCanRequestBorrow(
  * Only the tool owner (lender) can approve or decline a pending borrow request on their tool.
  */
 export function assertCanReviewLoanRequest(
-  user: ActorUser | null,
+  user: ActorUser | null | undefined,
   loan: LoanRecord
-): void {
+): asserts user is ActorUser {
   assertAuthenticated(user);
   if (loan.lenderId !== user._id) {
     throw new AuthorizationError(
@@ -169,9 +175,9 @@ export function assertCanReviewLoanRequest(
  * Only the tool owner (lender) or an admin can mark an active ('approved') loan as returned.
  */
 export function assertCanMarkLoanReturned(
-  user: ActorUser | null,
+  user: ActorUser | null | undefined,
   loan: LoanRecord
-): void {
+): asserts user is ActorUser {
   assertAuthenticated(user);
   if (loan.lenderId !== user._id && user.role !== "admin") {
     throw new AuthorizationError(
@@ -205,6 +211,28 @@ export function getTodayIsoDate(nowMs: number = Date.now()): string {
 }
 
 /**
+ * Validates tool name and short description lengths.
+ */
+export function validateToolFields(
+  name: string,
+  description: string
+): { trimmedName: string; trimmedDesc: string } {
+  const trimmedName = name.trim();
+  const trimmedDesc = description.trim();
+  if (trimmedName.length < 2 || trimmedName.length > 100) {
+    throw new ValidationError(
+      "Tool name must be between 2 and 100 characters."
+    );
+  }
+  if (trimmedDesc.length < 4 || trimmedDesc.length > 500) {
+    throw new ValidationError(
+      "Short description must be between 4 and 500 characters."
+    );
+  }
+  return { trimmedName, trimmedDesc };
+}
+
+/**
  * Validates borrow date range (YYYY-MM-DD).
  */
 export function validateBorrowDateRange(
@@ -220,6 +248,11 @@ export function validateBorrowDateRange(
   if (startDate > endDate) {
     throw new ValidationError(
       "End date must be on or after the start date."
+    );
+  }
+  if (startDate < todayIso) {
+    throw new ValidationError(
+      "Borrow start date cannot be in the past."
     );
   }
   if (endDate < todayIso) {

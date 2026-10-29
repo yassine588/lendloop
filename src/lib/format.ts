@@ -46,7 +46,10 @@ export function formatLoanAutomationBadge(params: {
     nowMs = Date.now(),
   } = params;
 
-  if (lastReminderSentAt) {
+  if (
+    lastReminderSentAt &&
+    (!lastAutomationAt || lastReminderSentAt >= lastAutomationAt)
+  ) {
     const rel = formatRelativeTime(lastReminderSentAt, nowMs);
     return `Reminder sent ${rel}`;
   }

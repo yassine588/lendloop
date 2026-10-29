@@ -347,9 +347,38 @@ describe("7. Convex Handlers Integration (Users, Tools, Loans, Idempotent n8n Ev
       {}
     );
     expect(publicAfterReturn).toHaveLength(1);
+    expect(ctx.scheduledCalls.length).toBe(3);
+
+    // 15. Carlos creates a new pending request, then Maya deletes the tool -> auto-declines request & dispatches n8n webhook
+    ctx.setIdentity({
+      subject: "clerk_carlos",
+      email: "carlos@example.com",
+      name: "Carlos Rivera",
+    });
+    const pendingLoanBeforeDelete = await invokeConvexFn<any, string>(
+      loansModule.requestBorrow,
+      ctx,
+      {
+        toolId,
+        startDate: "2099-06-01",
+        endDate: "2099-06-03",
+      }
+    );
+    expect(ctx.scheduledCalls.length).toBe(4);
+
+    ctx.setIdentity({
+      subject: "clerk_maya",
+      email: "maya@example.com",
+      name: "Maya Lin",
+    });
+    await invokeConvexFn(toolsModule.deleteTool, ctx, { toolId });
+    expect(ctx.scheduledCalls.length).toBe(5);
+    const autoDeclinedLoan = await ctx.db.get(pendingLoanBeforeDelete);
+    expect(autoDeclinedLoan.status).toBe("declined");
+    expect(autoDeclinedLoan.lenderNote).toBe("Listing was removed.");
   });
 
-  it("verifies Convex HTTP router rejects unsigned requests and accepts HMAC-signed callbacks", async () => {
+  it("verifies Convex HTTP router rejects unsigned requests, query-string tampering, invalid dates, and accepts HMAC-signed callbacks", async () => {
     const secret =
       "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
     process.env.LENDLOOP_WEBHOOK_SECRET = secret;
@@ -366,6 +395,11 @@ describe("7. Convex Handlers Integration (Users, Tools, Loans, Idempotent n8n Ev
         mutationsCalled.push(args);
         return { ok: true, deduplicated: false };
       },
+      runQuery: async (_fn: unknown, args: any) => ({
+        asOfDate: args.asOfDate,
+        count: 0,
+        overdueLoans: [],
+      }),
     };
 
     // 1. Unsigned request -> 401 Unauthorized
@@ -407,5 +441,42 @@ describe("7. Convex Handlers Integration (Users, Tools, Loans, Idempotent n8n Ev
     expect(mutationsCalled[0].idempotencyKey).toBe(
       "overdue-reminder:loans_1:2026-10-30"
     );
+
+    // 3. GET /api/n8n/overdue-loans rejects query string tampering & invalid asOfDate
+    const getRouteEntry = (httpRouter as any).getRoutes().find(
+      (r: any) => r[0] === "/api/n8n/overdue-loans" && r[1] === "GET"
+    );
+    expect(getRouteEntry).toBeDefined();
+    const getHandler = getRouteEntry[2]._handler;
+
+    const getHeaders = await signWebhookPayload({
+      secret,
+      rawBody: "/api/n8n/overdue-loans",
+      idempotencyKey: "poll_1",
+    });
+    const tamperedGetReq = new Request(
+      "https://example.convex.site/api/n8n/overdue-loans?asOfDate=2099-12-31",
+      {
+        method: "GET",
+        headers: getHeaders,
+      }
+    );
+    const tamperedGetRes = await getHandler(httpCtx, tamperedGetReq);
+    expect(tamperedGetRes.status).toBe(401);
+
+    const badDateHeaders = await signWebhookPayload({
+      secret,
+      rawBody: "/api/n8n/overdue-loans?asOfDate=invalid-date",
+      idempotencyKey: "poll_2",
+    });
+    const badDateReq = new Request(
+      "https://example.convex.site/api/n8n/overdue-loans?asOfDate=invalid-date",
+      {
+        method: "GET",
+        headers: badDateHeaders,
+      }
+    );
+    const badDateRes = await getHandler(httpCtx, badDateReq);
+    expect(badDateRes.status).toBe(400);
   });
 });

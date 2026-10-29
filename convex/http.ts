@@ -7,7 +7,7 @@ import {
   TIMESTAMP_HEADER,
   verifyWebhookSignature,
 } from "./lib/hmac";
-import { getTodayIsoDate } from "./lib/rbac";
+import { getTodayIsoDate, isValidIsoDateString } from "./lib/rbac";
 
 const http = httpRouter();
 
@@ -25,7 +25,7 @@ function jsonResponse(body: unknown, status = 200): Response {
  * GET /api/n8n/overdue-loans
  * Called daily by the n8n Overdue Reminders workflow.
  * Security: Requires valid `X-LendLoop-Timestamp` and `X-LendLoop-Signature`
- * computed over `${timestamp}./api/n8n/overdue-loans`.
+ * computed over `${timestamp}.${pathname}${search}` (e.g. `${timestamp}./api/n8n/overdue-loans`).
  */
 http.route({
   path: "/api/n8n/overdue-loans",
@@ -36,7 +36,7 @@ http.route({
       secret: process.env.LENDLOOP_WEBHOOK_SECRET,
       signatureHeader: request.headers.get(SIGNATURE_HEADER),
       timestampHeader: request.headers.get(TIMESTAMP_HEADER),
-      rawBody: url.pathname,
+      rawBody: `${url.pathname}${url.search}`,
     });
 
     if (!verification.valid) {
@@ -47,6 +47,13 @@ http.route({
     }
 
     const asOfDate = url.searchParams.get("asOfDate") ?? getTodayIsoDate();
+    if (!isValidIsoDateString(asOfDate)) {
+      return jsonResponse(
+        { error: "Invalid asOfDate query parameter; expected YYYY-MM-DD" },
+        400
+      );
+    }
+
     const payload = await ctx.runQuery(internal.n8n.getOverdueLoansForN8n, {
       asOfDate,
     });
@@ -104,6 +111,12 @@ http.route({
     }
 
     const reminderDateKey = parsed.reminderDateKey ?? getTodayIsoDate();
+    if (!isValidIsoDateString(reminderDateKey)) {
+      return jsonResponse(
+        { error: "Invalid reminderDateKey; expected YYYY-MM-DD" },
+        400
+      );
+    }
     const status = parsed.status === "failed" ? "failed" : "delivered";
     const summary =
       parsed.summary ??

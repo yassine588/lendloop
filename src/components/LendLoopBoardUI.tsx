@@ -1189,8 +1189,15 @@ export function LendLoopBoardUI(props: LendLoopBoardUIProps) {
                   <input
                     type="date"
                     required
+                    min={todayIso}
                     value={startDate}
-                    onChange={(e) => setStartDate(e.target.value)}
+                    onChange={(e) => {
+                      const nextStart = e.target.value;
+                      setStartDate(nextStart);
+                      if (nextStart > endDate) {
+                        setEndDate(nextStart);
+                      }
+                    }}
                     className="w-full rounded-lg border border-stone-300 px-3 py-2 text-sm"
                   />
                 </div>
@@ -1393,9 +1400,15 @@ function LoanCard(props: {
       </div>
 
       {loan.borrowerNote && (
-        <p className="text-xs text-stone-600 bg-stone-50 rounded-lg px-3 py-2 mb-3">
+        <p className="text-xs text-stone-600 bg-stone-50 rounded-lg px-3 py-2 mb-2">
           <span className="font-medium text-stone-700">Borrower note:</span>{" "}
           {loan.borrowerNote}
+        </p>
+      )}
+      {loan.lenderNote && (
+        <p className="text-xs text-stone-600 bg-emerald-50/40 border border-emerald-100 rounded-lg px-3 py-2 mb-3">
+          <span className="font-medium text-stone-700">Lender note:</span>{" "}
+          {loan.lenderNote}
         </p>
       )}
 
