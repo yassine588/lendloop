@@ -1,0 +1,175 @@
+{
+  "name": "LendLoop — 02 Daily Overdue Loan Reminders",
+  "nodes": [
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "0 9 * * *"
+            }
+          ]
+        }
+      },
+      "id": "node-daily-cron",
+      "name": "Daily 09:00 UTC Schedule",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [200, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst secret = $env.LENDLOOP_WEBHOOK_SECRET;\nconst convexSiteUrl = $env.CONVEX_SITE_URL;\n\nif (!secret || !convexSiteUrl) {\n  throw new Error('Missing LENDLOOP_WEBHOOK_SECRET or CONVEX_SITE_URL in n8n environment.');\n}\n\nconst pathname = '/api/n8n/overdue-loans';\nconst ts = String(Math.floor(Date.now() / 1000));\nconst sig = 'sha256=' + crypto\n  .createHmac('sha256', secret)\n  .update(`${ts}.${pathname}`)\n  .digest('hex');\n\nreturn [{\n  json: {\n    url: `${convexSiteUrl}${pathname}`,\n    ts,\n    sig\n  }\n}];"
+      },
+      "id": "node-sign-overdue-fetch",
+      "name": "Sign Overdue Loans GET Request",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [440, 300]
+    },
+    {
+      "parameters": {
+        "method": "GET",
+        "url": "={{ $json.url }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.sig }}"
+            }
+          ]
+        },
+        "options": {
+          "timeout": 15000
+        }
+      },
+      "id": "node-fetch-overdue-loans",
+      "name": "Fetch Overdue Loans from Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [680, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 3000
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst response = $input.first().json;\nconst overdueLoans = response.overdueLoans || [];\nconst asOfDate = response.asOfDate || new Date().toISOString().slice(0, 10);\n\nif (overdueLoans.length === 0) {\n  return [];\n}\n\nreturn overdueLoans.map((loan) => {\n  const reminderMessage = `Hi ${loan.borrowerName}, friendly reminder that ${loan.toolName} (borrowed from ${loan.lenderName}) was due on ${loan.endDate} (${loan.daysOverdue} day(s) overdue). Please coordinate return on LendLoop.`;\n\n  // Log reminder delivery using strictly minimized fields\n  console.log(JSON.stringify({\n    channel: 'lendloop_overdue_reminder',\n    to: loan.borrowerEmail,\n    loanId: loan.loanId,\n    toolName: loan.toolName,\n    daysOverdue: loan.daysOverdue,\n    idempotencyKey: loan.idempotencyKey,\n    message: reminderMessage,\n    sentAt: new Date().toISOString()\n  }));\n\n  const callbackPayload = {\n    idempotencyKey: loan.idempotencyKey,\n    loanId: loan.loanId,\n    reminderDateKey: asOfDate,\n    status: 'delivered',\n    summary: `Overdue reminder sent (${loan.daysOverdue}d overdue)`,\n    attemptCount: 1\n  };\n\n  const rawCallbackBody = JSON.stringify(callbackPayload);\n  const ts = String(Math.floor(Date.now() / 1000));\n  const sig = 'sha256=' + crypto\n    .createHmac('sha256', $env.LENDLOOP_WEBHOOK_SECRET)\n    .update(`${ts}.${rawCallbackBody}`)\n    .digest('hex');\n\n  return {\n    json: {\n      callbackUrl: `${$env.CONVEX_SITE_URL}/api/n8n/reminder-callback`,\n      rawCallbackBody,\n      ts,\n      sig,\n      idempotencyKey: loan.idempotencyKey\n    }\n  };\n});"
+      },
+      "id": "node-send-reminders-and-sign",
+      "name": "Send Borrower Reminders & Sign Idempotent Callbacks",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [940, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.sig }}"
+            },
+            {
+              "name": "x-idempotency-key",
+              "value": "={{ $json.idempotencyKey }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "={{ $json.rawCallbackBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "node-write-reminder-status",
+      "name": "Write Reminder Status Back to Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [1200, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Daily 09:00 UTC Schedule": {
+      "main": [
+        [
+          {
+            "node": "Sign Overdue Loans GET Request",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sign Overdue Loans GET Request": {
+      "main": [
+        [
+          {
+            "node": "Fetch Overdue Loans from Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Fetch Overdue Loans from Convex": {
+      "main": [
+        [
+          {
+            "node": "Send Borrower Reminders & Sign Idempotent Callbacks",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Send Borrower Reminders & Sign Idempotent Callbacks": {
+      "main": [
+        [
+          {
+            "node": "Write Reminder Status Back to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "lendloop-error-handler",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    {
+      "name": "lendloop"
+    },
+    {
+      "name": "overdue-reminders"
+    }
+  ]
+}

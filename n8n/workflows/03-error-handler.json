@@ -1,0 +1,100 @@
+{
+  "name": "LendLoop — 03 Automation Error Handler",
+  "nodes": [
+    {
+      "parameters": {},
+      "id": "node-error-trigger",
+      "name": "Error Trigger",
+      "type": "n8n-nodes-base.errorTrigger",
+      "typeVersion": 1,
+      "position": [220, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst errData = $input.first().json;\n\nconst workflowName = errData.workflow?.name || 'Unknown LendLoop Workflow';\nconst executionId = errData.execution?.id || String(Date.now());\nconst errorMessage = errData.execution?.error?.message || 'Unhandled n8n workflow execution failure';\nconst lastNodeExecuted = errData.execution?.lastNodeExecuted || 'UnknownNode';\n\n// Never fail silently: emit structured operator alert log\nconsole.error(JSON.stringify({\n  level: 'ERROR',\n  channel: 'lendloop_error_workflow',\n  alertRecipient: $env.OPS_ALERT_EMAIL || 'ops@lendloop.local',\n  workflowName,\n  executionId,\n  lastNodeExecuted,\n  errorMessage,\n  occurredAt: new Date().toISOString()\n}));\n\nconst callbackPayload = {\n  idempotencyKey: `n8n-error:${executionId}`,\n  workflow: 'error_handler',\n  eventType: 'workflow.error',\n  status: 'failed',\n  summary: `n8n failure in ${workflowName} (${lastNodeExecuted})`,\n  attemptCount: 1,\n  errorMessage: errorMessage.slice(0, 300)\n};\n\nconst rawCallbackBody = JSON.stringify(callbackPayload);\nconst ts = String(Math.floor(Date.now() / 1000));\nconst sig = 'sha256=' + crypto\n  .createHmac('sha256', $env.LENDLOOP_WEBHOOK_SECRET)\n  .update(`${ts}.${rawCallbackBody}`)\n  .digest('hex');\n\nreturn [{\n  json: {\n    callbackUrl: `${$env.CONVEX_SITE_URL}/api/n8n/automation-events`,\n    rawCallbackBody,\n    ts,\n    sig,\n    idempotencyKey: callbackPayload.idempotencyKey\n  }\n}];"
+      },
+      "id": "node-format-error-alert",
+      "name": "Format Operator Alert & Sign Failure Telemetry",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [480, 300]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.sig }}"
+            },
+            {
+              "name": "x-idempotency-key",
+              "value": "={{ $json.idempotencyKey }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "={{ $json.rawCallbackBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "node-report-error-to-convex",
+      "name": "Report Failure to Convex Automation Log",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [760, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Error Trigger": {
+      "main": [
+        [
+          {
+            "node": "Format Operator Alert & Sign Failure Telemetry",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Operator Alert & Sign Failure Telemetry": {
+      "main": [
+        [
+          {
+            "node": "Report Failure to Convex Automation Log",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    {
+      "name": "lendloop"
+    },
+    {
+      "name": "error-handling"
+    }
+  ]
+}

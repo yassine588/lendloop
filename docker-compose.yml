@@ -1,0 +1,31 @@
+version: "3.9"
+
+services:
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:1.80.3
+    container_name: lendloop-n8n
+    restart: unless-stopped
+    ports:
+      - "${N8N_PORT:-5678}:5678"
+    environment:
+      - N8N_HOST=${N8N_HOST:-localhost}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=${N8N_PROTOCOL:-http}
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=UTC
+      - TZ=UTC
+      # Encryption key for n8n credential store (loaded from .env.local, never hardcoded)
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # Allow Code nodes to read strictly scoped environment variables for HMAC verification
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - NODE_FUNCTION_ALLOW_BUILTIN=crypto
+      # Shared secret & Convex HTTP Actions endpoint injected via environment
+      - LENDLOOP_WEBHOOK_SECRET=${LENDLOOP_WEBHOOK_SECRET}
+      - CONVEX_SITE_URL=${CONVEX_SITE_URL}
+      - OPS_ALERT_EMAIL=${OPS_ALERT_EMAIL:-ops@lendloop.local}
+    volumes:
+      - n8n_storage:/home/node/.n8n
+      - ./n8n/workflows:/home/node/workflows:ro
+
+volumes:
+  n8n_storage:

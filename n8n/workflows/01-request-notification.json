@@ -1,0 +1,133 @@
+{
+  "name": "LendLoop — 01 Request & Status Notification",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "lendloop-loan-event",
+        "responseMode": "onReceived",
+        "options": {
+          "rawBody": true
+        }
+      },
+      "id": "node-webhook-loan-event",
+      "name": "Webhook: Loan Event",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 2,
+      "position": [220, 300],
+      "webhookId": "lendloop-loan-event"
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\n\nconst secret = $env.LENDLOOP_WEBHOOK_SECRET;\nif (!secret || secret.length < 16) {\n  throw new Error('LENDLOOP_WEBHOOK_SECRET is not configured in n8n environment.');\n}\n\nconst item = $input.first();\nconst headers = item.json.headers || {};\nconst sigHeader = headers['x-lendloop-signature'] || '';\nconst tsHeader = headers['x-lendloop-timestamp'] || '';\nconst bodyObj = item.json.body || {};\nconst rawBody = item.binary?.data\n  ? Buffer.from(item.binary.data.data, 'base64').toString('utf8')\n  : JSON.stringify(bodyObj);\n\nif (!sigHeader || !tsHeader) {\n  throw new Error('Unauthorized: Missing X-LendLoop-Signature or X-LendLoop-Timestamp header.');\n}\n\nconst nowSec = Math.floor(Date.now() / 1000);\nconst reqSec = Number(tsHeader);\nif (!Number.isFinite(reqSec) || Math.abs(nowSec - reqSec) > 300) {\n  throw new Error(`Unauthorized: Webhook timestamp outside 300s replay window (skew=${nowSec - reqSec}s).`);\n}\n\nconst providedHex = String(sigHeader).trim().toLowerCase().replace(/^sha256=/, '');\nconst expectedHex = crypto\n  .createHmac('sha256', secret)\n  .update(`${tsHeader}.${rawBody}`)\n  .digest('hex');\n\nconst a = Buffer.from(providedHex, 'utf8');\nconst b = Buffer.from(expectedHex, 'utf8');\nif (a.length !== b.length || !crypto.timingSafeEqual(a, b)) {\n  throw new Error('Unauthorized: Invalid HMAC-SHA256 webhook signature.');\n}\n\n// Strict Data Minimization: Extract only the fields required for notification\nconst {\n  eventId,\n  eventType,\n  loanId,\n  toolName,\n  toolCategory,\n  status,\n  startDate,\n  endDate,\n  recipientRole,\n  recipientName,\n  recipientEmail,\n  counterpartyName,\n  note\n} = bodyObj;\n\nconst templates = {\n  'loan.requested': {\n    subject: `[LendLoop] ${counterpartyName} requested to borrow your ${toolName}`,\n    message: `Hi ${recipientName}, ${counterpartyName} requested to borrow your ${toolName} (${toolCategory}) from ${startDate} to ${endDate}.${note ? ' Note: ' + note : ''}`,\n    activitySummary: `Request notification sent to lender (${recipientName})`\n  },\n  'loan.approved': {\n    subject: `[LendLoop] Approved! Your request for ${toolName} is confirmed`,\n    message: `Hi ${recipientName}, ${counterpartyName} approved your borrow request for ${toolName} (${startDate} to ${endDate}).`,\n    activitySummary: `Approval notification sent to borrower (${recipientName})`\n  },\n  'loan.declined': {\n    subject: `[LendLoop] Update on your request for ${toolName}`,\n    message: `Hi ${recipientName}, ${counterpartyName} was unable to approve your request for ${toolName} (${startDate} to ${endDate}).`,\n    activitySummary: `Decline notification sent to borrower (${recipientName})`\n  },\n  'loan.returned': {\n    subject: `[LendLoop] Return confirmed for ${toolName}`,\n    message: `Hi ${recipientName}, ${counterpartyName} marked ${toolName} as returned. Thanks for keeping LendLoop running smoothly!`,\n    activitySummary: `Return confirmation sent to borrower (${recipientName})`\n  }\n};\n\nconst tpl = templates[eventType] || {\n  subject: `[LendLoop] Update for ${toolName}`,\n  message: `Status changed to ${status} for ${toolName}.`,\n  activitySummary: `Notification processed (${eventType})`\n};\n\nreturn [{\n  json: {\n    eventId,\n    eventType,\n    loanId,\n    recipientRole,\n    recipientName,\n    recipientEmail,\n    subject: tpl.subject,\n    message: tpl.message,\n    activitySummary: tpl.activitySummary\n  }\n}];"
+      },
+      "id": "node-verify-hmac",
+      "name": "Verify HMAC Signature & Minimized Schema",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [460, 300]
+    },
+    {
+      "parameters": {
+        "jsCode": "const crypto = require('crypto');\nconst item = $input.first().json;\n\n// Deliver structured notification (can also be wired to SMTP / Slack / Discord credentials in n8n)\nconsole.log(JSON.stringify({\n  channel: 'lendloop_notification',\n  to: item.recipientEmail,\n  subject: item.subject,\n  body: item.message,\n  eventId: item.eventId,\n  deliveredAt: new Date().toISOString()\n}));\n\nconst callbackPayload = {\n  idempotencyKey: `n8n-ack:${item.eventId}`,\n  loanId: item.loanId,\n  workflow: 'request_notification',\n  eventType: item.eventType,\n  status: 'delivered',\n  summary: item.activitySummary,\n  attemptCount: 1\n};\n\nconst rawCallbackBody = JSON.stringify(callbackPayload);\nconst ts = String(Math.floor(Date.now() / 1000));\nconst sig = 'sha256=' + crypto\n  .createHmac('sha256', $env.LENDLOOP_WEBHOOK_SECRET)\n  .update(`${ts}.${rawCallbackBody}`)\n  .digest('hex');\n\nreturn [{\n  json: {\n    callbackUrl: `${$env.CONVEX_SITE_URL}/api/n8n/automation-events`,\n    rawCallbackBody,\n    ts,\n    sig,\n    idempotencyKey: callbackPayload.idempotencyKey\n  }\n}];"
+      },
+      "id": "node-deliver-and-sign-ack",
+      "name": "Deliver Notification & Sign Convex Write-Back",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [720, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "={{ $json.callbackUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "x-lendloop-timestamp",
+              "value": "={{ $json.ts }}"
+            },
+            {
+              "name": "x-lendloop-signature",
+              "value": "={{ $json.sig }}"
+            },
+            {
+              "name": "x-idempotency-key",
+              "value": "={{ $json.idempotencyKey }}"
+            },
+            {
+              "name": "content-type",
+              "value": "application/json"
+            }
+          ]
+        },
+        "sendBody": true,
+        "specifyBody": "string",
+        "body": "={{ $json.rawCallbackBody }}",
+        "options": {
+          "timeout": 10000
+        }
+      },
+      "id": "node-convex-callback",
+      "name": "Idempotent Write-Back to Convex",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [980, 300],
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 2000
+    }
+  ],
+  "connections": {
+    "Webhook: Loan Event": {
+      "main": [
+        [
+          {
+            "node": "Verify HMAC Signature & Minimized Schema",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Verify HMAC Signature & Minimized Schema": {
+      "main": [
+        [
+          {
+            "node": "Deliver Notification & Sign Convex Write-Back",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Deliver Notification & Sign Convex Write-Back": {
+      "main": [
+        [
+          {
+            "node": "Idempotent Write-Back to Convex",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1",
+    "errorWorkflow": "lendloop-error-handler",
+    "saveManualExecutions": true
+  },
+  "tags": [
+    {
+      "name": "lendloop"
+    },
+    {
+      "name": "notifications"
+    }
+  ]
+}
